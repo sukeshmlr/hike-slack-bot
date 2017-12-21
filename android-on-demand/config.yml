@@ -1,0 +1,69 @@
+version: 2
+jobs:
+  build:    
+    working_directory: ~/code
+    docker:
+      - image: circleci/android:api-26-alpha
+    environment:
+      _JAVA_OPTIONS: "-Xms128m -Xmx1900m"
+      GRADLE_OPTS: '-Dorg.gradle.jvmargs="-Xmx2560m -XX:+HeapDumpOnOutOfMemoryError"'
+      TZ: "/usr/share/zoneinfo/Asia/Kolkata"
+    steps:
+      - add-ssh-keys:
+          fingerprints:
+            - "35:4a:0b:93:9d:2d:1e:24:16:88:40:33:53:9f:84:83"
+      - run:
+         name: Run ssh-keyscan
+         command: ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+      - run:
+         name: Git clone
+         command:  |
+          git clone -b $branch --single-branch git@github.com:$fork/android-client.git
+      - restore_cache:
+          key: build-{{ checksum "android-client/build.gradle" }}-{{ checksum "android-client/build.gradle" }}
+      - run:
+          name: run tasks
+          command: |
+           cd android-client
+           versionName=`grep -o 'android:versionName="[^"]*"' AndroidManifest.xml | cut -d'"' -f2`
+           versionName=`echo ${versionName} | cut  -d'.' -f1,2,3`.${branch}.`date +%d%b%Y.%H%M`
+           sed -i.bak "s/.*android:versionName=\".*/    android:versionName=\"${versionName}\"\>/g" AndroidManifest.xml && rm AndroidManifest.xml.bak
+           curl -L -o hike-android-release-key.keystore $KEYSTORE_URL
+           version=$(grep -o "android:versionName=\".*\"" AndroidManifest.xml | cut -d'"' -f2)
+           export VERSION=$(echo $version)
+           export PATH=$PATH:$VERSION
+           python .circleci/on_demand_build/integrate_leak_canary.py
+           curl -L -o hike-android-release-key.keystore $KEYSTORE_URL
+           ./gradlew $tasks -b build.gradle --max-workers 6 --parallel --debug --info --stacktrace
+           find . -name "*unaligned*.apk" -exec rm -rf {} \;
+           version=$(grep -o "android:versionName=\".*\"" AndroidManifest.xml | cut -d'"' -f2)
+           echo VERSION=$(echo $version)> ./Version
+           version_code=$(grep -o "android:versionCode=\".*\"" AndroidManifest.xml | cut -d'"' -f2)
+           versionName=`grep -o 'android:versionName="[^"]*"' AndroidManifest.xml | cut -d'"' -f2`
+           echo "#${CIRCLE_BUILD_NUM}"-"${version_code}"-"${versionName}">./Build.txt
+           cat Build.txt
+          no_output_timeout: 3601
+      - run:
+         name: Post Build Failed to Slack
+         when: on_fail
+         command: |
+            sudo pip install slackclient
+            python android-client/.circleci/on_demand_build/slack_ondemand_fail.py 
+      - run:
+         name: Post Build sucess to Slack
+         when: on_success
+         command: |
+            sudo pip install slackclient 
+            python android-client/.circleci/on_demand_build/slack_ondemand_success.py
+      - store_artifacts:
+          path: /home/circleci/code/android-client/build/reports/tests/testArmReleaseUnitTest/index.html
+          destination: test-report
+      - store_artifacts:
+          path: /home/circleci/code/android-client/build/outputs/apk/
+          destination: ARM-APK's
+      - store_test_results:
+          path: /home/circleci/code/android-client/build/reports/tests/testArmReleaseUnitTest/index.html
+      - save_cache:
+          paths:
+            - ~/.gradle
+          key: build-{{ checksum "android-client/build.gradle" }}-{{ checksum  "android-client/build.gradle" }}
